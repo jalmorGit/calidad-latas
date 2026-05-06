@@ -1,15 +1,125 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
+
+const MAX_IMAGE_EDGE = 1280;
+const JPEG_QUALITY = 0.72;
+const MAX_PHOTOS = 6;
+
+function formatMegabytes(bytes: number) {
+  return (bytes / 1024 / 1024).toFixed(1) + " MB";
+}
+
+function canvasToBlob(canvas: HTMLCanvasElement, quality: number) {
+  return new Promise<Blob>((resolve, reject) => {
+    canvas.toBlob(
+      (blob) => {
+        if (blob) {
+          resolve(blob);
+          return;
+        }
+
+        reject(new Error("No se pudo comprimir la imagen"));
+      },
+      "image/jpeg",
+      quality
+    );
+  });
+}
+
+async function compressImage(file: File) {
+  if (!file.type.startsWith("image/")) {
+    throw new Error(`${file.name} no es una imagen compatible.`);
+  }
+
+  const imageUrl = URL.createObjectURL(file);
+
+  try {
+    const image = await new Promise<HTMLImageElement>((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => resolve(img);
+      img.onerror = () =>
+        reject(new Error(`No se pudo leer la imagen ${file.name}.`));
+      img.src = imageUrl;
+    });
+
+    const scale = Math.min(
+      1,
+      MAX_IMAGE_EDGE / Math.max(image.naturalWidth, image.naturalHeight)
+    );
+    const width = Math.max(1, Math.round(image.naturalWidth * scale));
+    const height = Math.max(1, Math.round(image.naturalHeight * scale));
+
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+
+    const ctx = canvas.getContext("2d");
+    if (!ctx) {
+      throw new Error("No se pudo preparar la imagen para subirla.");
+    }
+
+    ctx.drawImage(image, 0, 0, width, height);
+
+    const blob = await canvasToBlob(canvas, JPEG_QUALITY);
+    const compressedName = file.name.replace(/\.[^.]+$/, "") + ".jpg";
+
+    return new File([blob], compressedName, {
+      type: "image/jpeg",
+      lastModified: Date.now(),
+    });
+  } finally {
+    URL.revokeObjectURL(imageUrl);
+  }
+}
 
 export default function Home() {
   const [files, setFiles] = useState<File[]>([]);
   const [result, setResult] = useState("");
   const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [isPreparing, setIsPreparing] = useState(false);
+  const [uploadSummary, setUploadSummary] = useState("");
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  async function prepareFiles(selectedFiles: File[]) {
+    const selected = selectedFiles.slice(0, MAX_PHOTOS);
+    const originalBytes = selected.reduce((total, file) => total + file.size, 0);
+
+    setIsPreparing(true);
+    setResult("");
+    setUploadSummary("Preparando fotos...");
+
+    try {
+      const compressed = await Promise.all(selected.map(compressImage));
+      const compressedBytes = compressed.reduce(
+        (total, file) => total + file.size,
+        0
+      );
+
+      setFiles(compressed);
+      setUploadSummary(
+        `${compressed.length} foto${compressed.length === 1 ? "" : "s"} lista${
+          compressed.length === 1 ? "" : "s"
+        }: ${formatMegabytes(originalBytes)} -> ${formatMegabytes(
+          compressedBytes
+        )}`
+      );
+    } catch (error) {
+      setFiles([]);
+      setUploadSummary("");
+      setResult(error instanceof Error ? error.message : "Error preparando fotos.");
+    } finally {
+      setIsPreparing(false);
+
+      if (fileInputRef.current) {
+        fileInputRef.current.value = "";
+      }
+    }
+  }
 
   async function analyze() {
     if (files.length === 0) {
-      setResult("Primero captura o sube fotos del pack.");
+      setResult("Primero anade fotos del pack.");
       return;
     }
 
@@ -80,31 +190,40 @@ export default function Home() {
         <label className="block">
           <span className="flex min-h-32 cursor-pointer flex-col items-center justify-center rounded-lg border-2 border-dashed border-teal-300 bg-teal-50 px-4 py-6 text-center">
             <span className="text-base font-bold text-teal-900">
-              Capturar fotos del pack
+              Anadir fotos del pack
             </span>
             <span className="mt-1 text-sm text-teal-700">
-              Suciedad, plastico, carton y objetos extranos
+              Desde la app de fotos del movil o archivos
             </span>
           </span>
           <input
+            ref={fileInputRef}
             type="file"
-            accept="image/*"
-            capture="environment"
+            accept="image/jpeg,image/png,image/webp,image/*"
             multiple
             className="hidden"
             onChange={(e) => {
-              const selected = Array.from(e.target.files || []);
-              setFiles(selected);
+              void prepareFiles(Array.from(e.target.files || []));
             }}
           />
         </label>
 
+        {uploadSummary ? (
+          <p className="mt-3 rounded-md bg-slate-100 px-3 py-2 text-sm font-semibold text-slate-700">
+            {uploadSummary}
+          </p>
+        ) : null}
+
         <button
           onClick={analyze}
-          disabled={isAnalyzing}
+          disabled={isAnalyzing || isPreparing}
           className="mt-4 flex h-12 w-full items-center justify-center rounded-md bg-slate-950 px-4 text-base font-bold text-white shadow-sm transition active:scale-[0.99] disabled:cursor-not-allowed disabled:bg-slate-400"
         >
-          {isAnalyzing ? "Analizando..." : "Analizar limpieza"}
+          {isPreparing
+            ? "Preparando fotos..."
+            : isAnalyzing
+              ? "Analizando..."
+              : "Analizar limpieza"}
         </button>
       </section>
 
