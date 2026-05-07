@@ -78,8 +78,10 @@ los porcentajes deben estimarse EN PESO, no por volumen visual.)
 
 RECOMENDACIÓN:
 - ACEPTAR → si el aluminio estimado es superior al 80%
-- REVISAR → si está entre 60% y 80%
-- AVISAR ANTES DE DESCARGAR → si es menor del 60%
+- REVISAR → si está entre 66% y 80%
+- AVISAR ANTES DE DESCARGAR → si es 65% o menor
+
+La RECOMENDACIÓN es obligatoria. No omitas nunca este bloque.
 
 PENALIZACIÓN PRINCIPAL:
 - indica el principal motivo de pérdida de calidad
@@ -136,6 +138,42 @@ function formatContaminants(contaminants: TrainingExample["contaminants"]) {
   }
 
   return contaminants || "no indicado";
+}
+
+function getRecommendation(aluminumPercent: number) {
+  if (aluminumPercent > 80) {
+    return "ACEPTAR";
+  }
+
+  if (aluminumPercent > 65) {
+    return "REVISAR";
+  }
+
+  return "AVISAR ANTES DE DESCARGAR";
+}
+
+function ensureRecommendation(result: string) {
+  if (/RECOMENDACI[ÓO]N:/i.test(result)) {
+    return result;
+  }
+
+  const match = result.match(/%\s*ESTIMADO\s+ALUMINIO:\s*(\d{1,3})\s*%/i);
+
+  if (!match) {
+    return result;
+  }
+
+  const aluminumPercent = Number(match[1]);
+  const recommendation = `RECOMENDACIÓN:\n${getRecommendation(aluminumPercent)}`;
+
+  if (/PENALIZACI[ÓO]N\s+PRINCIPAL:/i.test(result)) {
+    return result.replace(
+      /PENALIZACI[ÓO]N\s+PRINCIPAL:/i,
+      `${recommendation}\n\nPENALIZACIÓN PRINCIPAL:`
+    );
+  }
+
+  return `${result.trim()}\n\n${recommendation}`;
 }
 
 function getStoragePathFromUrl(imageUrl: string) {
@@ -432,8 +470,10 @@ Antes de analizar las fotos nuevas, usa estos ejemplos reales del cliente solo c
       max_output_tokens: 220,
     });
 
+    const result = ensureRecommendation(response.output_text);
+
     return NextResponse.json({
-      result: response.output_text,
+      result,
       trainingExamplesUsed: trainingExamples.length,
       savedImages: uploadedImages,
     });
