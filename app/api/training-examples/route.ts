@@ -12,11 +12,16 @@ const SUPPORTED_IMAGE_TYPES = new Set([
 
 function getSupabaseConfig() {
   const supabaseUrl = process.env.SUPABASE_URL;
-  const supabaseKey =
-    process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY;
+  const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-  if (!supabaseUrl || !supabaseKey) {
-    throw new Error("Faltan SUPABASE_URL y SUPABASE_KEY en .env.local");
+  if (!supabaseUrl) {
+    throw new Error("Falta SUPABASE_URL en .env.local");
+  }
+
+  if (!supabaseKey) {
+    throw new Error(
+      "Para guardar ejemplos necesitas SUPABASE_SERVICE_ROLE_KEY en .env.local. La anon key puede leer datos publicos, pero no debe usarse para subir al bucket desde este endpoint."
+    );
   }
 
   if (
@@ -79,7 +84,7 @@ async function uploadTrainingImage(
   if (!response.ok) {
     const errorText = await response.text();
     throw new Error(
-      `No se pudo subir la imagen a Supabase (${response.status}): ${errorText}`
+      `No se pudo subir la imagen al bucket "${TRAINING_BUCKET}" de Supabase (${response.status}): ${errorText}`
     );
   }
 

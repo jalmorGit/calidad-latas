@@ -5,6 +5,7 @@ import type { ResponseInputContent } from "openai/resources/responses/responses"
 const MAX_IMAGES = 6;
 const MAX_TOTAL_BYTES = 35 * 1024 * 1024;
 const MAX_TRAINING_EXAMPLES = 12;
+const ANALYSIS_BUCKET = process.env.SUPABASE_ANALYSIS_BUCKET || "pedido-fotos";
 const SUPPORTED_IMAGE_TYPES = new Set([
   "image/jpeg",
   "image/png",
@@ -22,6 +23,43 @@ type TrainingExample = {
 
 function formatMegabytes(bytes: number) {
   return (bytes / 1024 / 1024).toFixed(1) + " MB";
+}
+
+function getSupabaseConfig(requireServiceRole = false) {
+  const supabaseUrl = process.env.SUPABASE_URL;
+  const supabaseKey = requireServiceRole
+    ? process.env.SUPABASE_SERVICE_ROLE_KEY
+    : process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY;
+
+  if (!supabaseUrl || !supabaseKey) {
+    if (requireServiceRole) {
+      throw new Error(
+        "Para guardar fotos evaluadas necesitas SUPABASE_URL y SUPABASE_SERVICE_ROLE_KEY en .env.local."
+      );
+    }
+
+    return null;
+  }
+
+  if (
+    supabaseUrl.includes("your-supabase-url") ||
+    !supabaseUrl.startsWith("https://")
+  ) {
+    throw new Error(
+      "SUPABASE_URL no es valida. Usa la Project URL real de Supabase."
+    );
+  }
+
+  return { supabaseUrl: supabaseUrl.replace(/\/$/, ""), supabaseKey };
+}
+
+function sanitizeFileName(fileName: string) {
+  return fileName
+    .toLowerCase()
+    .replace(/\.[^.]+$/, "")
+    .replace(/[^a-z0-9-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80);
 }
 
 function formatContaminants(contaminants: TrainingExample["contaminants"]) {
@@ -55,22 +93,13 @@ Usa estos ejemplos como referencia de calibracion. Si las nuevas imagenes se par
 }
 
 async function getTrainingExamples() {
-  const supabaseUrl = process.env.SUPABASE_URL;
-  const supabaseKey =
-    process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY;
+  const supabaseConfig = getSupabaseConfig();
 
-  if (!supabaseUrl || !supabaseKey) {
+  if (!supabaseConfig) {
     return [];
   }
 
-  if (
-    supabaseUrl.includes("your-supabase-url") ||
-    !supabaseUrl.startsWith("https://")
-  ) {
-    throw new Error(
-      "SUPABASE_URL no es valida. Usa la Project URL real de Supabase."
-    );
-  }
+  const { supabaseUrl, supabaseKey } = supabaseConfig;
 
   const url = new URL("/rest/v1/training_examples", supabaseUrl);
   url.searchParams.set(
@@ -93,6 +122,59 @@ async function getTrainingExamples() {
   }
 
   return (await response.json()) as TrainingExample[];
+}
+
+async function uploadAnalyzedImage(
+  supabaseUrl: string,
+  supabaseKey: string,
+  file: File
+) {
+  const extension = file.type.split("/")[1] || "jpg";
+  const today = new Date().toISOString().slice(0, 10);
+  const path = `${today}/${Date.now()}-${crypto.randomUUID()}-${sanitizeFileName(
+    file.name
+  )}.${extension}`;
+  const uploadUrl = new URL(
+    `/storage/v1/object/${ANALYSIS_BUCKET}/${path}`,
+    supabaseUrl
+  );
+
+  const response = await fetch(uploadUrl, {
+    method: "POST",
+    headers: {
+      apikey: supabaseKey,
+      Authorization: `Bearer ${supabaseKey}`,
+      "Content-Type": file.type,
+      "x-upsert": "false",
+    },
+    body: file,
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(
+      `No se pudo subir la foto evaluada al bucket "${ANALYSIS_BUCKET}" de Supabase (${response.status}): ${errorText}`
+    );
+  }
+
+  return {
+    path,
+    url: `${supabaseUrl}/storage/v1/object/public/${ANALYSIS_BUCKET}/${path}`,
+  };
+}
+
+async function uploadAnalyzedImages(images: File[]) {
+  const supabaseConfig = getSupabaseConfig(true);
+
+  if (!supabaseConfig) {
+    throw new Error("No se pudo cargar la configuracion de Supabase.");
+  }
+
+  const { supabaseUrl, supabaseKey } = supabaseConfig;
+
+  return Promise.all(
+    images.map((image) => uploadAnalyzedImage(supabaseUrl, supabaseKey, image))
+  );
 }
 
 export async function POST(req: NextRequest) {
@@ -142,6 +224,8 @@ export async function POST(req: NextRequest) {
         { status: 413 }
       );
     }
+
+    const uploadedImages = await uploadAnalyzedImages(images);
 
     const openai = new OpenAI({
       apiKey: process.env.OPENAI_API_KEY,
@@ -195,6 +279,7 @@ Indica que es un análisis preliminar pendiente de control de calidad humano.${t
     return NextResponse.json({
       result: response.output_text,
       trainingExamplesUsed: trainingExamples.length,
+      savedImages: uploadedImages,
     });
   } catch (error: unknown) {
     console.error("ERROR ANALYZE:", error);

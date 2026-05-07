@@ -70,12 +70,24 @@ export default function Home() {
       const text = await res.text();
 
       if (!res.ok) {
-        setResult("Error:\n" + text);
+        try {
+          const data = JSON.parse(text);
+          setResult("Error:\n" + (data.error || text));
+        } catch {
+          setResult("Error:\n" + text);
+        }
         return;
       }
 
       const data = JSON.parse(text);
-      setResult(data.result || "Sin resultado");
+      const savedCount = Array.isArray(data.savedImages)
+        ? data.savedImages.length
+        : 0;
+      const savedMessage = savedCount
+        ? `\n\nFotos guardadas en Supabase: ${savedCount}`
+        : "";
+
+      setResult((data.result || "Sin resultado") + savedMessage);
     } finally {
       setIsAnalyzing(false);
     }
