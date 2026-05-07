@@ -4,7 +4,8 @@ import type { ResponseInputContent } from "openai/resources/responses/responses"
 
 const MAX_IMAGES = 6;
 const MAX_TOTAL_BYTES = 35 * 1024 * 1024;
-const MAX_TRAINING_EXAMPLES = 12;
+const TRAINING_EXAMPLE_POOL_SIZE = 60;
+const MAX_TRAINING_EXAMPLES = 10;
 const ANALYSIS_BUCKET = process.env.SUPABASE_ANALYSIS_BUCKET || "pedido-fotos";
 const SUPPORTED_IMAGE_TYPES = new Set([
   "image/jpeg",
@@ -14,12 +15,86 @@ const SUPPORTED_IMAGE_TYPES = new Set([
 ]);
 
 type TrainingExample = {
+  image_url: string | null;
   score: number | null;
   dirt_level: string | null;
   contaminants: string[] | string | null;
   decision: string | null;
   notes: string | null;
 };
+
+const ANALYSIS_PROMPT = `Analiza estas imágenes de fardos o paquetes de latas de aluminio procedentes de un camión o pedido de reciclaje.
+
+Tu objetivo principal es estimar la composición EN PESO, no en volumen visual.
+
+Muy importante:
+
+- No calcules los porcentajes por la superficie visible en la imagen.
+- Estima los porcentajes según el peso probable de cada material.
+- El plástico, el papel y el cartón pueden ocupar mucho volumen visual pero pesan muy poco frente al aluminio compactado.
+- Por tanto, aunque se vea bastante plástico o papel, el porcentaje en peso de impropios puede ser bajo.
+- El barro, la tierra, la humedad y los restos orgánicos sí pueden penalizar mucho más porque añaden peso real y reducen la calidad del material.
+- La imagen solo muestra el frente o una parte del fardo, así que debes indicar siempre el nivel de incertidumbre.
+
+Material principal esperado:
+
+- Latas de aluminio compactadas.
+
+Impropios habituales:
+
+- Plástico
+- Papel
+- Cartón
+- Basura general
+- Barro o tierra
+- Humedad
+- Otros metales o botes no deseados
+- Objetos extraños
+
+Devuelve el resultado en este formato:
+
+1. Porcentaje estimado EN PESO:
+
+- Aluminio/latas: X%
+- Impropios totales: X%
+- Humedad/barro/tierra: X%
+- Otros materiales: X%
+
+2. Calidad estimada:
+
+- Excelente / buena / media / baja / rechazable
+
+3. Puntuación de calidad:
+
+- 0 a 100
+
+4. Penalización principal:
+
+- Indica qué material o factor reduce más la calidad.
+
+5. Razonamiento:
+
+- Explica brevemente por qué has estimado esos porcentajes en peso.
+- Si hay mucho plástico o papel visible, recuerda valorar que su peso relativo puede ser pequeño.
+- Si hay barro, humedad o tierra, penaliza más porque aportan peso y deterioran el material.
+
+6. Recomendación:
+
+- aceptar
+- aceptar con penalización
+- revisar manualmente
+- rechazar
+
+7. Incertidumbre:
+
+- baja / media / alta
+- Explica si la foto no permite ver suficiente profundidad del fardo.
+
+Regla de criterio:
+
+Un fardo puede tener un 85%-95% de aluminio en peso aunque visualmente aparezcan plásticos o papeles, siempre que esos impropios sean ligeros y no haya barro, humedad intensa o basura pesada.
+
+No des una respuesta excesivamente optimista. Si solo se ve una parte del fardo, indica que es una estimación preliminar pendiente de control de calidad humano.`;
 
 function formatMegabytes(bytes: number) {
   return (bytes / 1024 / 1024).toFixed(1) + " MB";
@@ -70,28 +145,6 @@ function formatContaminants(contaminants: TrainingExample["contaminants"]) {
   return contaminants || "no indicado";
 }
 
-function buildTrainingPrompt(examples: TrainingExample[]) {
-  if (!examples.length) {
-    return "";
-  }
-
-  const formattedExamples = examples
-    .map((example, index) => {
-      return `Ejemplo ${index + 1}:
-- puntuacion cliente: ${example.score ?? "no indicada"}
-- nivel de suciedad: ${example.dirt_level || "no indicado"}
-- contaminantes: ${formatContaminants(example.contaminants)}
-- decision cliente: ${example.decision || "no indicada"}
-- observaciones: ${example.notes || "sin observaciones"}`;
-    })
-    .join("\n\n");
-
-  return `\n\nEjemplos reales puntuados por el cliente para calibrar la escala:
-${formattedExamples}
-
-Usa estos ejemplos como referencia de calibracion. Si las nuevas imagenes se parecen a un ejemplo, ajusta la puntuacion y la decision de forma coherente con ese criterio del cliente.`;
-}
-
 async function getTrainingExamples() {
   const supabaseConfig = getSupabaseConfig();
 
@@ -104,10 +157,10 @@ async function getTrainingExamples() {
   const url = new URL("/rest/v1/training_examples", supabaseUrl);
   url.searchParams.set(
     "select",
-    "score,dirt_level,contaminants,decision,notes"
+    "image_url,score,dirt_level,contaminants,decision,notes"
   );
   url.searchParams.set("order", "created_at.desc");
-  url.searchParams.set("limit", String(MAX_TRAINING_EXAMPLES));
+  url.searchParams.set("limit", String(TRAINING_EXAMPLE_POOL_SIZE));
 
   const response = await fetch(url, {
     headers: {
@@ -121,7 +174,15 @@ async function getTrainingExamples() {
     throw new Error(`Supabase respondio con estado ${response.status}`);
   }
 
-  return (await response.json()) as TrainingExample[];
+  const examples = ((await response.json()) as TrainingExample[]).filter(
+    (example) => example.image_url
+  );
+
+  return examples
+    .map((example) => ({ example, sort: Math.random() }))
+    .sort((a, b) => a.sort - b.sort)
+    .slice(0, MAX_TRAINING_EXAMPLES)
+    .map(({ example }) => example);
 }
 
 async function uploadAnalyzedImage(
@@ -239,21 +300,39 @@ export async function POST(req: NextRequest) {
       console.error("ERROR TRAINING EXAMPLES:", error);
     }
 
-    const trainingPrompt = buildTrainingPrompt(trainingExamples);
-
     const content: ResponseInputContent[] = [
       {
         type: "input_text",
-        text: `Analiza estas imágenes de paquetes de latas de aluminio.
-Devuelve:
-- puntuación de calidad de 0 a 100
-- nivel de suciedad
-- contaminantes detectados: cartón, plástico, basura u objetos extraños
-- recomendación: aceptar, penalizar, revisar o rechazar
-- explicación breve.
-Indica que es un análisis preliminar pendiente de control de calidad humano.${trainingPrompt}`,
+        text: `${ANALYSIS_PROMPT}
+
+Antes de analizar las fotos nuevas, revisa los siguientes ejemplos reales del cliente. Cada ejemplo incluye una foto ya evaluada y su criterio humano. Utiliza estos ejemplos para calibrar la puntuacion, la decision y la severidad de los impropios en peso.`,
       },
     ];
+
+    trainingExamples.forEach((example, index) => {
+      content.push({
+        type: "input_text",
+        text: `Ejemplo real ${index + 1} del cliente:
+- puntuacion cliente: ${example.score ?? "no indicada"}
+- nivel de suciedad: ${example.dirt_level || "no indicado"}
+- decision cliente: ${example.decision || "no indicada"}
+- contaminantes: ${formatContaminants(example.contaminants)}
+- observaciones: ${example.notes || "sin observaciones"}`,
+      });
+
+      if (example.image_url) {
+        content.push({
+          type: "input_image",
+          image_url: example.image_url,
+          detail: "low",
+        });
+      }
+    });
+
+    content.push({
+      type: "input_text",
+      text: "Ahora analiza las siguientes fotos nuevas del pedido/camion. No son ejemplos: son las imagenes que debes evaluar usando el prompt principal y la calibracion anterior.",
+    });
 
     for (const file of images) {
       const buffer = Buffer.from(await file.arrayBuffer());
