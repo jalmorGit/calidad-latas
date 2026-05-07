@@ -7,6 +7,8 @@ const MAX_TOTAL_BYTES = 35 * 1024 * 1024;
 const TRAINING_EXAMPLE_POOL_SIZE = 60;
 const MAX_TRAINING_EXAMPLES = 10;
 const ANALYSIS_BUCKET = process.env.SUPABASE_ANALYSIS_BUCKET || "pedido-fotos";
+const TRAINING_BUCKET =
+  process.env.SUPABASE_TRAINING_BUCKET || "training-images";
 const SUPPORTED_IMAGE_TYPES = new Set([
   "image/jpeg",
   "image/png",
@@ -102,9 +104,11 @@ function formatMegabytes(bytes: number) {
 
 function getSupabaseConfig(requireServiceRole = false) {
   const supabaseUrl = process.env.SUPABASE_URL;
+  const serverKey =
+    process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY;
   const supabaseKey = requireServiceRole
-    ? process.env.SUPABASE_SERVICE_ROLE_KEY
-    : process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY;
+    ? serverKey
+    : serverKey || process.env.SUPABASE_KEY;
 
   if (!supabaseUrl || !supabaseKey) {
     if (requireServiceRole) {
@@ -143,6 +147,49 @@ function formatContaminants(contaminants: TrainingExample["contaminants"]) {
   }
 
   return contaminants || "no indicado";
+}
+
+function getStoragePathFromUrl(imageUrl: string) {
+  const marker = `/storage/v1/object/public/${TRAINING_BUCKET}/`;
+  const markerIndex = imageUrl.indexOf(marker);
+
+  if (markerIndex === -1) {
+    return null;
+  }
+
+  return decodeURIComponent(imageUrl.slice(markerIndex + marker.length));
+}
+
+async function getTrainingImageDataUrl(
+  supabaseUrl: string,
+  supabaseKey: string,
+  imageUrl: string
+) {
+  const storagePath = getStoragePathFromUrl(imageUrl);
+  const fetchUrl = storagePath
+    ? new URL(`/storage/v1/object/${TRAINING_BUCKET}/${storagePath}`, supabaseUrl)
+    : new URL(imageUrl);
+
+  const response = await fetch(fetchUrl, {
+    headers: storagePath
+      ? {
+          apikey: supabaseKey,
+          Authorization: `Bearer ${supabaseKey}`,
+        }
+      : undefined,
+    cache: "no-store",
+  });
+
+  if (!response.ok) {
+    throw new Error(
+      `No se pudo leer imagen de entrenamiento (${response.status})`
+    );
+  }
+
+  const contentType = response.headers.get("content-type") || "image/jpeg";
+  const buffer = Buffer.from(await response.arrayBuffer());
+
+  return `data:${contentType};base64,${buffer.toString("base64")}`;
 }
 
 async function getTrainingExamples() {
@@ -309,7 +356,9 @@ Antes de analizar las fotos nuevas, revisa los siguientes ejemplos reales del cl
       },
     ];
 
-    trainingExamples.forEach((example, index) => {
+    const supabaseConfig = getSupabaseConfig();
+
+    for (const [index, example] of trainingExamples.entries()) {
       content.push({
         type: "input_text",
         text: `Ejemplo real ${index + 1} del cliente:
@@ -320,14 +369,28 @@ Antes de analizar las fotos nuevas, revisa los siguientes ejemplos reales del cl
 - observaciones: ${example.notes || "sin observaciones"}`,
       });
 
-      if (example.image_url) {
-        content.push({
-          type: "input_image",
-          image_url: example.image_url,
-          detail: "low",
-        });
+      if (example.image_url && supabaseConfig) {
+        try {
+          const imageDataUrl = await getTrainingImageDataUrl(
+            supabaseConfig.supabaseUrl,
+            supabaseConfig.supabaseKey,
+            example.image_url
+          );
+
+          content.push({
+            type: "input_image",
+            image_url: imageDataUrl,
+            detail: "low",
+          });
+        } catch (error) {
+          console.error("ERROR TRAINING IMAGE:", error);
+          content.push({
+            type: "input_text",
+            text: "La foto de este ejemplo no se pudo adjuntar, pero sus datos de calibracion siguen disponibles.",
+          });
+        }
       }
-    });
+    }
 
     content.push({
       type: "input_text",
