@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
+import Link from "next/link";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -55,6 +56,20 @@ export default function RootLayout({
                 Turno activo
               </div>
             </div>
+            <nav className="mt-3 grid grid-cols-2 gap-2">
+              <Link
+                href="/"
+                className="flex h-9 items-center justify-center rounded-md bg-slate-950 px-3 text-sm font-bold text-white"
+              >
+                Analizar
+              </Link>
+              <Link
+                href="/training"
+                className="flex h-9 items-center justify-center rounded-md border border-slate-300 bg-white px-3 text-sm font-bold text-slate-800"
+              >
+                Aprender
+              </Link>
+            </nav>
           </header>
 
           <div className="flex flex-1 flex-col">{children}</div>
