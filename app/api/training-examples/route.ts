@@ -19,7 +19,16 @@ function getSupabaseConfig() {
     throw new Error("Faltan SUPABASE_URL y SUPABASE_KEY en .env.local");
   }
 
-  return { supabaseUrl, supabaseKey };
+  if (
+    supabaseUrl.includes("your-supabase-url") ||
+    !supabaseUrl.startsWith("https://")
+  ) {
+    throw new Error(
+      "SUPABASE_URL no es valida. Usa la Project URL real de Supabase, por ejemplo https://xxxxx.supabase.co"
+    );
+  }
+
+  return { supabaseUrl: supabaseUrl.replace(/\/$/, ""), supabaseKey };
 }
 
 function sanitizeFileName(fileName: string) {
@@ -68,7 +77,10 @@ async function uploadTrainingImage(
   });
 
   if (!response.ok) {
-    throw new Error(`No se pudo subir la imagen a Supabase (${response.status})`);
+    const errorText = await response.text();
+    throw new Error(
+      `No se pudo subir la imagen a Supabase (${response.status}): ${errorText}`
+    );
   }
 
   return `${supabaseUrl}/storage/v1/object/public/${TRAINING_BUCKET}/${path}`;
@@ -100,7 +112,10 @@ async function insertTrainingExample(
   });
 
   if (!response.ok) {
-    throw new Error(`No se pudo guardar el ejemplo (${response.status})`);
+    const errorText = await response.text();
+    throw new Error(
+      `No se pudo guardar el ejemplo (${response.status}): ${errorText}`
+    );
   }
 
   return response.json();

@@ -63,6 +63,15 @@ async function getTrainingExamples() {
     return [];
   }
 
+  if (
+    supabaseUrl.includes("your-supabase-url") ||
+    !supabaseUrl.startsWith("https://")
+  ) {
+    throw new Error(
+      "SUPABASE_URL no es valida. Usa la Project URL real de Supabase."
+    );
+  }
+
   const url = new URL("/rest/v1/training_examples", supabaseUrl);
   url.searchParams.set(
     "select",

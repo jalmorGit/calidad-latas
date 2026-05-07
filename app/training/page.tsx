@@ -67,7 +67,12 @@ export default function TrainingPage() {
       const text = await response.text();
 
       if (!response.ok) {
-        setStatus("Error:\n" + text);
+        try {
+          const data = JSON.parse(text);
+          setStatus("Error:\n" + (data.error || text));
+        } catch {
+          setStatus("Error:\n" + text);
+        }
         return;
       }
 
