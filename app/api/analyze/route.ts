@@ -4,6 +4,7 @@ import type { ResponseInputContent } from "openai/resources/responses/responses"
 
 const MAX_IMAGES = 6;
 const MAX_TOTAL_BYTES = 35 * 1024 * 1024;
+const MAX_TRAINING_EXAMPLES = 12;
 const SUPPORTED_IMAGE_TYPES = new Set([
   "image/jpeg",
   "image/png",
@@ -11,8 +12,78 @@ const SUPPORTED_IMAGE_TYPES = new Set([
   "image/gif",
 ]);
 
+type TrainingExample = {
+  score: number | null;
+  dirt_level: string | null;
+  contaminants: string[] | string | null;
+  decision: string | null;
+  notes: string | null;
+};
+
 function formatMegabytes(bytes: number) {
   return (bytes / 1024 / 1024).toFixed(1) + " MB";
+}
+
+function formatContaminants(contaminants: TrainingExample["contaminants"]) {
+  if (Array.isArray(contaminants)) {
+    return contaminants.length ? contaminants.join(", ") : "no indicado";
+  }
+
+  return contaminants || "no indicado";
+}
+
+function buildTrainingPrompt(examples: TrainingExample[]) {
+  if (!examples.length) {
+    return "";
+  }
+
+  const formattedExamples = examples
+    .map((example, index) => {
+      return `Ejemplo ${index + 1}:
+- puntuacion cliente: ${example.score ?? "no indicada"}
+- nivel de suciedad: ${example.dirt_level || "no indicado"}
+- contaminantes: ${formatContaminants(example.contaminants)}
+- decision cliente: ${example.decision || "no indicada"}
+- observaciones: ${example.notes || "sin observaciones"}`;
+    })
+    .join("\n\n");
+
+  return `\n\nEjemplos reales puntuados por el cliente para calibrar la escala:
+${formattedExamples}
+
+Usa estos ejemplos como referencia de calibracion. Si las nuevas imagenes se parecen a un ejemplo, ajusta la puntuacion y la decision de forma coherente con ese criterio del cliente.`;
+}
+
+async function getTrainingExamples() {
+  const supabaseUrl = process.env.SUPABASE_URL;
+  const supabaseKey =
+    process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY;
+
+  if (!supabaseUrl || !supabaseKey) {
+    return [];
+  }
+
+  const url = new URL("/rest/v1/training_examples", supabaseUrl);
+  url.searchParams.set(
+    "select",
+    "score,dirt_level,contaminants,decision,notes"
+  );
+  url.searchParams.set("order", "created_at.desc");
+  url.searchParams.set("limit", String(MAX_TRAINING_EXAMPLES));
+
+  const response = await fetch(url, {
+    headers: {
+      apikey: supabaseKey,
+      Authorization: `Bearer ${supabaseKey}`,
+    },
+    cache: "no-store",
+  });
+
+  if (!response.ok) {
+    throw new Error(`Supabase respondio con estado ${response.status}`);
+  }
+
+  return (await response.json()) as TrainingExample[];
 }
 
 export async function POST(req: NextRequest) {
@@ -67,6 +138,16 @@ export async function POST(req: NextRequest) {
       apiKey: process.env.OPENAI_API_KEY,
     });
 
+    let trainingExamples: TrainingExample[] = [];
+
+    try {
+      trainingExamples = await getTrainingExamples();
+    } catch (error) {
+      console.error("ERROR TRAINING EXAMPLES:", error);
+    }
+
+    const trainingPrompt = buildTrainingPrompt(trainingExamples);
+
     const content: ResponseInputContent[] = [
       {
         type: "input_text",
@@ -77,7 +158,7 @@ Devuelve:
 - contaminantes detectados: cartón, plástico, basura u objetos extraños
 - recomendación: aceptar, penalizar, revisar o rechazar
 - explicación breve.
-Indica que es un análisis preliminar pendiente de control de calidad humano.`,
+Indica que es un análisis preliminar pendiente de control de calidad humano.${trainingPrompt}`,
       },
     ];
 
@@ -104,6 +185,7 @@ Indica que es un análisis preliminar pendiente de control de calidad humano.`,
 
     return NextResponse.json({
       result: response.output_text,
+      trainingExamplesUsed: trainingExamples.length,
     });
   } catch (error: unknown) {
     console.error("ERROR ANALYZE:", error);
