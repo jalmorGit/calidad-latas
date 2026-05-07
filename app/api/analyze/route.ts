@@ -4,8 +4,10 @@ import type { ResponseInputContent } from "openai/resources/responses/responses"
 
 const MAX_IMAGES = 6;
 const MAX_TOTAL_BYTES = 35 * 1024 * 1024;
-const TRAINING_EXAMPLE_POOL_SIZE = 60;
-const MAX_TRAINING_EXAMPLES = 10;
+const TRAINING_EXAMPLE_POOL_SIZE = 30;
+const MAX_TRAINING_EXAMPLES = Number(
+  process.env.ANALYSIS_TRAINING_EXAMPLES || 4
+);
 const ANALYSIS_BUCKET = process.env.SUPABASE_ANALYSIS_BUCKET || "pedido-fotos";
 const TRAINING_BUCKET =
   process.env.SUPABASE_TRAINING_BUCKET || "training-images";
@@ -25,78 +27,35 @@ type TrainingExample = {
   notes: string | null;
 };
 
-const ANALYSIS_PROMPT = `Analiza estas imágenes de fardos o paquetes de latas de aluminio procedentes de un camión o pedido de reciclaje.
+const ANALYSIS_PROMPT = `Analiza estas imágenes de fardos o paquetes de latas de aluminio.
 
-Tu objetivo principal es estimar la composición EN PESO, no en volumen visual.
+IMPORTANTE:
+Los porcentajes deben estimarse EN PESO, no por volumen visible.
 
-Muy importante:
+Ten en cuenta:
+- El plástico, papel y cartón ocupan mucho volumen visual pero pesan muy poco frente al aluminio.
+- Aunque se vea bastante plástico o papel, el porcentaje de aluminio puede seguir siendo muy alto.
+- Si ves papeles, etiquetas, albaranes o carteles usados para identificar la procedencia del paquete, NO los cuentes como impropios ni penalizacion.
+- Solo penaliza papel/carton cuando parezca material mezclado dentro del fardo, no documentacion externa de identificacion.
+- El barro, tierra, humedad y residuos pesados sí penalizan mucho porque añaden peso real.
+- La imagen solo muestra parte del fardo, así que la estimación es aproximada.
 
-- No calcules los porcentajes por la superficie visible en la imagen.
-- Estima los porcentajes según el peso probable de cada material.
-- El plástico, el papel y el cartón pueden ocupar mucho volumen visual pero pesan muy poco frente al aluminio compactado.
-- Por tanto, aunque se vea bastante plástico o papel, el porcentaje en peso de impropios puede ser bajo.
-- El barro, la tierra, la humedad y los restos orgánicos sí pueden penalizar mucho más porque añaden peso real y reducen la calidad del material.
-- La imagen solo muestra el frente o una parte del fardo, así que debes indicar siempre el nivel de incertidumbre.
+Devuelve SOLO este formato:
 
-Material principal esperado:
+% ESTIMADO ALUMINIO: XX%
+% IMPROPIOS: XX%
 
-- Latas de aluminio compactadas.
+RECOMENDACIÓN:
+- ACEPTAR → si el aluminio estimado es superior al 80%
+- REVISAR → si está entre 60% y 80%
+- AVISAR ANTES DE DESCARGAR → si es menor del 60%
 
-Impropios habituales:
+PENALIZACIÓN PRINCIPAL:
+- indica el principal motivo de pérdida de calidad
+(ejemplo: barro, humedad, exceso de plástico, cartón, basura, otros metales, suciedad, etc.)
 
-- Plástico
-- Papel
-- Cartón
-- Basura general
-- Barro o tierra
-- Humedad
-- Otros metales o botes no deseados
-- Objetos extraños
-
-Devuelve el resultado en este formato:
-
-1. Porcentaje estimado EN PESO:
-
-- Aluminio/latas: X%
-- Impropios totales: X%
-- Humedad/barro/tierra: X%
-- Otros materiales: X%
-
-2. Calidad estimada:
-
-- Excelente / buena / media / baja / rechazable
-
-3. Puntuación de calidad:
-
-- 0 a 100
-
-4. Penalización principal:
-
-- Indica qué material o factor reduce más la calidad.
-
-5. Razonamiento:
-
-- Explica brevemente por qué has estimado esos porcentajes en peso.
-- Si hay mucho plástico o papel visible, recuerda valorar que su peso relativo puede ser pequeño.
-- Si hay barro, humedad o tierra, penaliza más porque aportan peso y deterioran el material.
-
-6. Recomendación:
-
-- aceptar
-- aceptar con penalización
-- revisar manualmente
-- rechazar
-
-7. Incertidumbre:
-
-- baja / media / alta
-- Explica si la foto no permite ver suficiente profundidad del fardo.
-
-Regla de criterio:
-
-Un fardo puede tener un 85%-95% de aluminio en peso aunque visualmente aparezcan plásticos o papeles, siempre que esos impropios sean ligeros y no haya barro, humedad intensa o basura pesada.
-
-No des una respuesta excesivamente optimista. Si solo se ve una parte del fardo, indica que es una estimación preliminar pendiente de control de calidad humano.`;
+No añadas razonamientos largos ni explicaciones técnicas.
+Respuesta breve, clara y operativa para personal de planta.`;
 
 function formatMegabytes(bytes: number) {
   return (bytes / 1024 / 1024).toFixed(1) + " MB";
@@ -285,6 +244,34 @@ async function uploadAnalyzedImages(images: File[]) {
   );
 }
 
+async function getTrainingImageDataUrls(
+  examples: TrainingExample[],
+  supabaseConfig: { supabaseUrl: string; supabaseKey: string } | null
+) {
+  if (!supabaseConfig) {
+    return examples.map(() => null);
+  }
+
+  return Promise.all(
+    examples.map(async (example) => {
+      if (!example.image_url) {
+        return null;
+      }
+
+      try {
+        return await getTrainingImageDataUrl(
+          supabaseConfig.supabaseUrl,
+          supabaseConfig.supabaseKey,
+          example.image_url
+        );
+      } catch (error) {
+        console.error("ERROR TRAINING IMAGE:", error);
+        return null;
+      }
+    })
+  );
+}
+
 export async function POST(req: NextRequest) {
   try {
     const formData = await req.formData();
@@ -333,30 +320,41 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const uploadedImages = await uploadAnalyzedImages(images);
-
     const openai = new OpenAI({
       apiKey: process.env.OPENAI_API_KEY,
     });
 
-    let trainingExamples: TrainingExample[] = [];
-
-    try {
-      trainingExamples = await getTrainingExamples();
-    } catch (error) {
+    const trainingExamplesPromise = getTrainingExamples().catch((error) => {
       console.error("ERROR TRAINING EXAMPLES:", error);
-    }
+      return [] as TrainingExample[];
+    });
+    const uploadedImagesPromise = uploadAnalyzedImages(images);
+    const newImageDataUrlsPromise = Promise.all(
+      images.map(async (file) => {
+        const buffer = Buffer.from(await file.arrayBuffer());
+        return `data:${file.type};base64,${buffer.toString("base64")}`;
+      })
+    );
+
+    const [uploadedImages, trainingExamples, newImageDataUrls] =
+      await Promise.all([
+        uploadedImagesPromise,
+        trainingExamplesPromise,
+        newImageDataUrlsPromise,
+      ]);
+    const trainingImageDataUrls = await getTrainingImageDataUrls(
+      trainingExamples,
+      getSupabaseConfig()
+    );
 
     const content: ResponseInputContent[] = [
       {
         type: "input_text",
         text: `${ANALYSIS_PROMPT}
 
-Antes de analizar las fotos nuevas, revisa los siguientes ejemplos reales del cliente. Cada ejemplo incluye una foto ya evaluada y su criterio humano. Utiliza estos ejemplos para calibrar la puntuacion, la decision y la severidad de los impropios en peso.`,
+Antes de analizar las fotos nuevas, usa estos ejemplos reales del cliente solo como calibracion breve de criterio. Prioriza siempre el formato de salida indicado.`,
       },
     ];
-
-    const supabaseConfig = getSupabaseConfig();
 
     for (const [index, example] of trainingExamples.entries()) {
       content.push({
@@ -369,26 +367,14 @@ Antes de analizar las fotos nuevas, revisa los siguientes ejemplos reales del cl
 - observaciones: ${example.notes || "sin observaciones"}`,
       });
 
-      if (example.image_url && supabaseConfig) {
-        try {
-          const imageDataUrl = await getTrainingImageDataUrl(
-            supabaseConfig.supabaseUrl,
-            supabaseConfig.supabaseKey,
-            example.image_url
-          );
+      const trainingImageDataUrl = trainingImageDataUrls[index];
 
-          content.push({
-            type: "input_image",
-            image_url: imageDataUrl,
-            detail: "low",
-          });
-        } catch (error) {
-          console.error("ERROR TRAINING IMAGE:", error);
-          content.push({
-            type: "input_text",
-            text: "La foto de este ejemplo no se pudo adjuntar, pero sus datos de calibracion siguen disponibles.",
-          });
-        }
+      if (trainingImageDataUrl) {
+        content.push({
+          type: "input_image",
+          image_url: trainingImageDataUrl,
+          detail: "low",
+        });
       }
     }
 
@@ -397,13 +383,10 @@ Antes de analizar las fotos nuevas, revisa los siguientes ejemplos reales del cl
       text: "Ahora analiza las siguientes fotos nuevas del pedido/camion. No son ejemplos: son las imagenes que debes evaluar usando el prompt principal y la calibracion anterior.",
     });
 
-    for (const file of images) {
-      const buffer = Buffer.from(await file.arrayBuffer());
-      const base64 = buffer.toString("base64");
-
+    for (const imageDataUrl of newImageDataUrls) {
       content.push({
         type: "input_image",
-        image_url: `data:${file.type};base64,${base64}`,
+        image_url: imageDataUrl,
         detail: "low",
       });
     }
@@ -416,6 +399,7 @@ Antes de analizar las fotos nuevas, revisa los siguientes ejemplos reales del cl
           content,
         },
       ],
+      max_output_tokens: 220,
     });
 
     return NextResponse.json({
