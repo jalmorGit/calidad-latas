@@ -40,10 +40,41 @@ Ten en cuenta:
 - El barro, tierra, humedad y residuos pesados sí penalizan mucho porque añaden peso real.
 - La imagen solo muestra parte del fardo, así que la estimación es aproximada.
 
+El objetivo principal es estimar:
+1. porcentaje de aluminio
+2. porcentaje total de impropios
+3. desglose de impropios por tipo de material
+
+Los impropios pueden incluir:
+- plástico
+- papel
+- cartón
+- aerosoles
+- barro o tierra
+- humedad
+- móviles o aparatos electrónicos
+- basura general
+- otros metales
+- textiles
+- madera
+- vidrio
+- cualquier otro material visible
+
 Devuelve SOLO este formato:
 
 % ESTIMADO ALUMINIO: XX%
 % IMPROPIOS: XX%
+
+DESGLOSE IMPROPIOS:
+- Plástico: X%
+- Papel/cartón: X%
+- Barro/humedad: X%
+- Aerosoles: X%
+- Otros metales: X%
+- Otros: X%
+
+(RECUERDA:
+los porcentajes deben estimarse EN PESO, no por volumen visual.)
 
 RECOMENDACIÓN:
 - ACEPTAR → si el aluminio estimado es superior al 80%
@@ -52,7 +83,6 @@ RECOMENDACIÓN:
 
 PENALIZACIÓN PRINCIPAL:
 - indica el principal motivo de pérdida de calidad
-(ejemplo: barro, humedad, exceso de plástico, cartón, basura, otros metales, suciedad, etc.)
 
 No añadas razonamientos largos ni explicaciones técnicas.
 Respuesta breve, clara y operativa para personal de planta.`;
