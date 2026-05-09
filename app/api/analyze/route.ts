@@ -27,7 +27,7 @@ type TrainingExample = {
   notes: string | null;
 };
 
-const ANALYSIS_PROMPT = `Analiza estas imágenes de fardos o paquetes de latas de aluminio.
+const ANALYSIS_PROMPT = `Analiza estas imágenes de fardos de botes.
 
 IMPORTANTE:
 Los porcentajes deben estimarse EN PESO, no por volumen visible.
@@ -35,7 +35,7 @@ Los porcentajes deben estimarse EN PESO, no por volumen visible.
 Ten en cuenta:
 - El plástico, papel y cartón ocupan mucho volumen visual pero pesan muy poco frente al aluminio.
 - Aunque se vea bastante plástico o papel, el porcentaje de aluminio puede seguir siendo muy alto.
-- Si ves papeles, etiquetas, albaranes o carteles usados para identificar la procedencia del paquete, NO los cuentes como impropios ni penalizacion.
+- Si ves papeles, etiquetas, albaranes o carteles usados para identificar la procedencia del fardo, NO los cuentes como impropios ni penalizacion.
 - Solo penaliza papel/carton cuando parezca material mezclado dentro del fardo, no documentacion externa de identificacion.
 - El barro, tierra, humedad y residuos pesados sí penalizan mucho porque añaden peso real.
 - La imagen solo muestra parte del fardo, así que la estimación es aproximada.

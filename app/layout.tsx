@@ -14,13 +14,13 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Calidad Latas | Control movil",
+  title: "RECYQ | Control movil",
   description:
-    "Aplicacion movil para inspeccionar packs de latas de aluminio antes de su limpieza y reciclaje en planta.",
-  applicationName: "Calidad Latas",
+    "Aplicacion movil para inspeccionar fardos de botes antes de su limpieza y reciclaje en planta.",
+  applicationName: "RECYQ",
   appleWebApp: {
     capable: true,
-    title: "Calidad Latas",
+    title: "RECYQ",
     statusBarStyle: "black-translucent",
   },
 };
@@ -49,7 +49,7 @@ export default function RootLayout({
                   Planta reciclaje
                 </p>
                 <h1 className="text-xl font-bold leading-tight text-slate-950">
-                  Calidad de packs
+                  RECYQ
                 </h1>
               </div>
               <div className="rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700">

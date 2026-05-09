@@ -51,12 +51,12 @@ export default function Home() {
 
   async function analyze() {
     if (files.length === 0) {
-      setResult("Primero anade fotos del pack.");
+      setResult("Primero anade fotos del fardo.");
       return;
     }
 
     setIsAnalyzing(true);
-    setResult("Analizando limpieza del pack...");
+    setResult("Analizando limpieza del fardo...");
 
     const formData = new FormData();
     files.forEach((file) => formData.append("images", file));
@@ -102,7 +102,7 @@ export default function Home() {
               Inspeccion preliminar
             </p>
             <h2 className="mt-1 text-2xl font-bold leading-tight text-slate-950">
-              Pack de latas de aluminio
+              Fardos de Botes
             </h2>
           </div>
           <span className="rounded-full bg-amber-100 px-3 py-1 text-xs font-bold text-amber-800">
@@ -134,7 +134,7 @@ export default function Home() {
         <label className="block">
           <span className="flex min-h-32 cursor-pointer flex-col items-center justify-center rounded-lg border-2 border-dashed border-teal-300 bg-teal-50 px-4 py-6 text-center">
             <span className="text-base font-bold text-teal-900">
-              Anadir fotos del pack
+              Anadir fotos del fardo
             </span>
             <span className="mt-1 text-sm text-teal-700">
               Desde la app de fotos del movil o archivos
@@ -181,7 +181,7 @@ export default function Home() {
 
         <pre className="mt-3 min-h-44 flex-1 whitespace-pre-wrap rounded-md bg-slate-950 p-4 text-sm leading-6 text-slate-50">
           {result ||
-            "Sin analisis todavia. Captura fotos claras del pack antes de enviarlo a limpieza."}
+            "Sin analisis todavia. Captura fotos claras del fardo antes de enviarlo a limpieza."}
         </pre>
       </section>
 
