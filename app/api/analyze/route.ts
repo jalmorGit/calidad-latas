@@ -2,15 +2,14 @@ import { NextRequest, NextResponse } from "next/server";
 import OpenAI from "openai";
 import type { ResponseInputContent } from "openai/resources/responses/responses";
 
-const MAX_IMAGES = 6;
+const REQUIRED_BALE_IMAGES = 5;
+const MAX_IMAGES = 1 + REQUIRED_BALE_IMAGES;
 const MAX_TOTAL_BYTES = 35 * 1024 * 1024;
 const TRAINING_EXAMPLE_POOL_SIZE = 30;
 const MAX_TRAINING_EXAMPLES = Number(
   process.env.ANALYSIS_TRAINING_EXAMPLES || 4
 );
 const ANALYSIS_BUCKET = process.env.SUPABASE_ANALYSIS_BUCKET || "pedido-fotos";
-const TRAINING_BUCKET =
-  process.env.SUPABASE_TRAINING_BUCKET || "training-images";
 const SUPPORTED_IMAGE_TYPES = new Set([
   "image/jpeg",
   "image/png",
@@ -27,7 +26,14 @@ type TrainingExample = {
   notes: string | null;
 };
 
-const ANALYSIS_PROMPT = `Analiza estas imágenes de fardos de botes.
+const ANALYSIS_PROMPT = `Analiza una recepcion de camion en una planta de reciclaje.
+
+Primero recibiras UNA imagen de la matricula del camion.
+Despues recibiras CINCO imagenes de la primera capa visible de fardos de botes.
+
+Tareas:
+1. Lee la matricula del camion. Si no se ve con seguridad, indica "NO LEGIBLE".
+2. Analiza solo las cinco fotos de fardos para estimar la calidad de la carga.
 
 IMPORTANTE:
 Los porcentajes deben estimarse EN PESO, no por volumen visible.
@@ -62,6 +68,8 @@ Los impropios pueden incluir:
 
 Devuelve SOLO este formato:
 
+MATRICULA: XXXXXXX
+
 % ESTIMADO ALUMINIO: XX%
 % IMPROPIOS: XX%
 
@@ -83,6 +91,9 @@ RECOMENDACIÓN:
 
 La RECOMENDACIÓN es obligatoria. No omitas nunca este bloque.
 
+REFERENCIA PRIMERA CAPA:
+- indica en una frase si la primera capa parece limpia, revisable o problematica
+
 PENALIZACIÓN PRINCIPAL:
 - indica el principal motivo de pérdida de calidad
 
@@ -91,6 +102,11 @@ Respuesta breve, clara y operativa para personal de planta.`;
 
 function formatMegabytes(bytes: number) {
   return (bytes / 1024 / 1024).toFixed(1) + " MB";
+}
+
+async function fileToDataUrl(file: File) {
+  const buffer = Buffer.from(await file.arrayBuffer());
+  return `data:${file.type};base64,${buffer.toString("base64")}`;
 }
 
 function getSupabaseConfig(requireServiceRole = false) {
@@ -176,49 +192,6 @@ function ensureRecommendation(result: string) {
   return `${result.trim()}\n\n${recommendation}`;
 }
 
-function getStoragePathFromUrl(imageUrl: string) {
-  const marker = `/storage/v1/object/public/${TRAINING_BUCKET}/`;
-  const markerIndex = imageUrl.indexOf(marker);
-
-  if (markerIndex === -1) {
-    return null;
-  }
-
-  return decodeURIComponent(imageUrl.slice(markerIndex + marker.length));
-}
-
-async function getTrainingImageDataUrl(
-  supabaseUrl: string,
-  supabaseKey: string,
-  imageUrl: string
-) {
-  const storagePath = getStoragePathFromUrl(imageUrl);
-  const fetchUrl = storagePath
-    ? new URL(`/storage/v1/object/${TRAINING_BUCKET}/${storagePath}`, supabaseUrl)
-    : new URL(imageUrl);
-
-  const response = await fetch(fetchUrl, {
-    headers: storagePath
-      ? {
-          apikey: supabaseKey,
-          Authorization: `Bearer ${supabaseKey}`,
-        }
-      : undefined,
-    cache: "no-store",
-  });
-
-  if (!response.ok) {
-    throw new Error(
-      `No se pudo leer imagen de entrenamiento (${response.status})`
-    );
-  }
-
-  const contentType = response.headers.get("content-type") || "image/jpeg";
-  const buffer = Buffer.from(await response.arrayBuffer());
-
-  return `data:${contentType};base64,${buffer.toString("base64")}`;
-}
-
 async function getTrainingExamples() {
   const supabaseConfig = getSupabaseConfig();
 
@@ -262,11 +235,12 @@ async function getTrainingExamples() {
 async function uploadAnalyzedImage(
   supabaseUrl: string,
   supabaseKey: string,
-  file: File
+  file: File,
+  category: "matricula" | "fardos"
 ) {
   const extension = file.type.split("/")[1] || "jpg";
   const today = new Date().toISOString().slice(0, 10);
-  const path = `${today}/${Date.now()}-${crypto.randomUUID()}-${sanitizeFileName(
+  const path = `${today}/${category}/${Date.now()}-${crypto.randomUUID()}-${sanitizeFileName(
     file.name
   )}.${extension}`;
   const uploadUrl = new URL(
@@ -298,7 +272,7 @@ async function uploadAnalyzedImage(
   };
 }
 
-async function uploadAnalyzedImages(images: File[]) {
+async function uploadAnalyzedImages(licensePlateImage: File, baleImages: File[]) {
   const supabaseConfig = getSupabaseConfig(true);
 
   if (!supabaseConfig) {
@@ -307,49 +281,53 @@ async function uploadAnalyzedImages(images: File[]) {
 
   const { supabaseUrl, supabaseKey } = supabaseConfig;
 
-  return Promise.all(
-    images.map((image) => uploadAnalyzedImage(supabaseUrl, supabaseKey, image))
+  const uploadedLicensePlate = await uploadAnalyzedImage(
+    supabaseUrl,
+    supabaseKey,
+    licensePlateImage,
+    "matricula"
   );
-}
-
-async function getTrainingImageDataUrls(
-  examples: TrainingExample[],
-  supabaseConfig: { supabaseUrl: string; supabaseKey: string } | null
-) {
-  if (!supabaseConfig) {
-    return examples.map(() => null);
-  }
-
-  return Promise.all(
-    examples.map(async (example) => {
-      if (!example.image_url) {
-        return null;
-      }
-
-      try {
-        return await getTrainingImageDataUrl(
-          supabaseConfig.supabaseUrl,
-          supabaseConfig.supabaseKey,
-          example.image_url
-        );
-      } catch (error) {
-        console.error("ERROR TRAINING IMAGE:", error);
-        return null;
-      }
-    })
+  const uploadedBales = await Promise.all(
+    baleImages.map((image) =>
+      uploadAnalyzedImage(supabaseUrl, supabaseKey, image, "fardos")
+    )
   );
+
+  return [uploadedLicensePlate, ...uploadedBales];
 }
 
 export async function POST(req: NextRequest) {
   try {
     const formData = await req.formData();
-    const images = formData
+    const licensePlateImage = formData.get("licensePlateImage");
+    const baleImages = formData
+      .getAll("baleImages")
+      .filter((value): value is File => value instanceof File);
+    const legacyImages = formData
       .getAll("images")
       .filter((value): value is File => value instanceof File);
 
-    if (!images.length) {
+    const normalizedLicensePlateImage =
+      licensePlateImage instanceof File ? licensePlateImage : legacyImages[0];
+    const normalizedBaleImages = baleImages.length
+      ? baleImages
+      : legacyImages.slice(1);
+    const images = normalizedLicensePlateImage
+      ? [normalizedLicensePlateImage, ...normalizedBaleImages]
+      : normalizedBaleImages;
+
+    if (!normalizedLicensePlateImage) {
       return NextResponse.json(
-        { error: "No se han recibido imágenes" },
+        { error: "Falta la foto de la matricula del camion." },
+        { status: 400 }
+      );
+    }
+
+    if (normalizedBaleImages.length !== REQUIRED_BALE_IMAGES) {
+      return NextResponse.json(
+        {
+          error: `Necesitas exactamente ${REQUIRED_BALE_IMAGES} fotos de fardos.`,
+        },
         { status: 400 }
       );
     }
@@ -396,31 +374,43 @@ export async function POST(req: NextRequest) {
       console.error("ERROR TRAINING EXAMPLES:", error);
       return [] as TrainingExample[];
     });
-    const uploadedImagesPromise = uploadAnalyzedImages(images);
+    const uploadedImagesPromise = uploadAnalyzedImages(
+      normalizedLicensePlateImage,
+      normalizedBaleImages
+    );
+    const licensePlateImageDataUrlPromise = fileToDataUrl(
+      normalizedLicensePlateImage
+    );
     const newImageDataUrlsPromise = Promise.all(
-      images.map(async (file) => {
-        const buffer = Buffer.from(await file.arrayBuffer());
-        return `data:${file.type};base64,${buffer.toString("base64")}`;
-      })
+      normalizedBaleImages.map(fileToDataUrl)
     );
 
-    const [uploadedImages, trainingExamples, newImageDataUrls] =
-      await Promise.all([
-        uploadedImagesPromise,
-        trainingExamplesPromise,
-        newImageDataUrlsPromise,
-      ]);
-    const trainingImageDataUrls = await getTrainingImageDataUrls(
+    const [
+      uploadedImages,
       trainingExamples,
-      getSupabaseConfig()
-    );
-
+      licensePlateImageDataUrl,
+      newImageDataUrls,
+    ] = await Promise.all([
+      uploadedImagesPromise,
+      trainingExamplesPromise,
+      licensePlateImageDataUrlPromise,
+      newImageDataUrlsPromise,
+    ]);
     const content: ResponseInputContent[] = [
       {
         type: "input_text",
         text: `${ANALYSIS_PROMPT}
 
-Antes de analizar las fotos nuevas, usa estos ejemplos reales del cliente solo como calibracion breve de criterio. Prioriza siempre el formato de salida indicado.`,
+La siguiente imagen corresponde a la matricula del camion. Usala solo para leer la matricula, no para evaluar la calidad de los fardos.`,
+      },
+      {
+        type: "input_image",
+        image_url: licensePlateImageDataUrl,
+        detail: "low",
+      },
+      {
+        type: "input_text",
+        text: "Antes de analizar las fotos nuevas de fardos, usa estos ejemplos reales del cliente solo como calibracion breve de criterio. No hay imagenes de ejemplo en esta peticion: prioriza siempre el formato de salida indicado.",
       },
     ];
 
@@ -434,21 +424,11 @@ Antes de analizar las fotos nuevas, usa estos ejemplos reales del cliente solo c
 - contaminantes: ${formatContaminants(example.contaminants)}
 - observaciones: ${example.notes || "sin observaciones"}`,
       });
-
-      const trainingImageDataUrl = trainingImageDataUrls[index];
-
-      if (trainingImageDataUrl) {
-        content.push({
-          type: "input_image",
-          image_url: trainingImageDataUrl,
-          detail: "low",
-        });
-      }
     }
 
     content.push({
       type: "input_text",
-      text: "Ahora analiza las siguientes fotos nuevas del pedido/camion. No son ejemplos: son las imagenes que debes evaluar usando el prompt principal y la calibracion anterior.",
+      text: "Ahora analiza las siguientes cinco fotos nuevas de la primera capa de fardos del camion. No son ejemplos: son las imagenes que debes evaluar usando el prompt principal y la calibracion anterior.",
     });
 
     for (const imageDataUrl of newImageDataUrls) {
@@ -467,7 +447,7 @@ Antes de analizar las fotos nuevas, usa estos ejemplos reales del cliente solo c
           content,
         },
       ],
-      max_output_tokens: 220,
+      max_output_tokens: 280,
     });
 
     const result = ensureRecommendation(response.output_text);
